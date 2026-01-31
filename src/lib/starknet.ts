@@ -15,8 +15,8 @@ export interface StarknetWalletBalances {
   tokenBalances: StarknetTokenBalance[];
 }
 
-// Starknet mainnet RPC
-const STARKNET_RPC = "https://starknet-mainnet.public.blastapi.io";
+// Starknet mainnet RPC (using free public endpoint)
+const STARKNET_RPC = "https://free-rpc.nethermind.io/mainnet-juno";
 
 // Main tokens on Starknet
 const STARKNET_TOKENS = [
