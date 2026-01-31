@@ -15,8 +15,8 @@ export interface StarknetWalletBalances {
   tokenBalances: StarknetTokenBalance[];
 }
 
-// Starknet mainnet RPC (using free public endpoint)
-const STARKNET_RPC = "https://free-rpc.nethermind.io/mainnet-juno";
+// Starknet mainnet RPC
+const STARKNET_RPC = "https://starknet-mainnet.g.alchemy.com/starknet/version/rpc/v0_7/demo";
 
 // Main tokens on Starknet
 const STARKNET_TOKENS = [
@@ -87,15 +87,28 @@ export async function getStarknetWalletBalances(
       });
       const result = await contract.balanceOf(walletAddress);
       
-      // Handle Uint256 response (low, high)
+      // Handle Uint256 response (low, high) - starknet.js v9
       let balance: bigint;
-      if (typeof result === "object" && "balance" in result) {
-        const balanceObj = result.balance as { low: bigint; high: bigint };
-        balance = balanceObj.low + (balanceObj.high << 128n);
-      } else if (typeof result === "bigint") {
-        balance = result;
-      } else {
-        balance = BigInt(num.toHex(result));
+      try {
+        if (typeof result === "bigint") {
+          balance = result;
+        } else if (typeof result === "object" && result !== null) {
+          // Could be { low, high } or { balance: { low, high } } or just a number
+          const balanceValue = "balance" in result ? result.balance : result;
+          if (typeof balanceValue === "bigint") {
+            balance = balanceValue;
+          } else if (typeof balanceValue === "object" && balanceValue !== null && "low" in balanceValue) {
+            const low = BigInt(String(balanceValue.low || 0));
+            const high = BigInt(String(balanceValue.high || 0));
+            balance = low + (high << 128n);
+          } else {
+            balance = BigInt(String(balanceValue));
+          }
+        } else {
+          balance = BigInt(String(result));
+        }
+      } catch {
+        balance = 0n;
       }
 
       if (balance > 0n) {
