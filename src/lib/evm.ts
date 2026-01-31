@@ -42,11 +42,20 @@ const ERC20_ABI = [
   },
 ] as const;
 
+// Hyperliquid chain definition (not in viem by default)
+const hyperliquid = {
+  id: 998,
+  name: "Hyperliquid",
+  nativeCurrency: { name: "Ether", symbol: "ETH", decimals: 18 },
+  rpcUrls: { default: { http: ["https://api.hyperliquid.xyz/evm"] } },
+} as const;
+
 // Chain configs
 const CHAINS = {
   ethereum: { chain: mainnet, rpc: "https://eth.llamarpc.com" },
   base: { chain: base, rpc: "https://base.llamarpc.com" },
   arbitrum: { chain: arbitrum, rpc: "https://arbitrum.llamarpc.com" },
+  hyperliquid: { chain: hyperliquid, rpc: "https://api.hyperliquid.xyz/evm" },
 };
 
 // Top tokens to check per chain
@@ -71,11 +80,20 @@ const TOKENS_TO_CHECK: Record<string, Array<{ address: Address; symbol: string; 
     { address: "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1", symbol: "WETH", decimals: 18 },
     { address: "0x912CE59144191C1204E64559FE8253a0e49E6548", symbol: "ARB", decimals: 18 },
   ],
+  hyperliquid: [
+    { address: "0xB8CE59FC3717ada4C02eaDF9682A9e934F625ebb", symbol: "USDC", decimals: 6 },
+    { address: "0x4200000000000000000000000000000000000006", symbol: "WETH", decimals: 18 },
+    { address: "0x0000000000000000000000000000000000000000", symbol: "HYPE", decimals: 18 }, // Native HYPE
+  ],
 };
+
+export type EVMChain = "ethereum" | "base" | "arbitrum" | "hyperliquid";
+
+export const ALL_EVM_CHAINS: EVMChain[] = ["ethereum", "base", "arbitrum", "hyperliquid"];
 
 export async function getEVMWalletBalances(
   walletAddress: string,
-  chainName: "ethereum" | "base" | "arbitrum"
+  chainName: EVMChain
 ): Promise<WalletBalances> {
   const chainConfig = CHAINS[chainName];
   if (!chainConfig) throw new Error(`Unsupported chain: ${chainName}`);
@@ -131,4 +149,32 @@ export async function getEVMWalletBalances(
     nativeBalance,
     tokenBalances,
   };
+}
+
+// Get balances from all EVM chains at once
+export async function getAllEVMWalletBalances(
+  walletAddress: string
+): Promise<WalletBalances[]> {
+  const results: WalletBalances[] = [];
+  
+  // Query all chains in parallel
+  const promises = ALL_EVM_CHAINS.map(async (chainName) => {
+    try {
+      const balances = await getEVMWalletBalances(walletAddress, chainName);
+      return balances;
+    } catch (error) {
+      console.warn(`Error fetching ${chainName} balances:`, error);
+      return null;
+    }
+  });
+
+  const allResults = await Promise.all(promises);
+  
+  for (const result of allResults) {
+    if (result) {
+      results.push(result);
+    }
+  }
+
+  return results;
 }

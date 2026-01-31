@@ -4,7 +4,7 @@ import { createAgent } from "@lucid-agents/core";
 import { http } from "@lucid-agents/http";
 import { payments, paymentsFromEnv } from "@lucid-agents/payments";
 
-import { getEVMWalletBalances } from "./evm";
+import { getEVMWalletBalances, getAllEVMWalletBalances, type EVMChain, ALL_EVM_CHAINS } from "./evm";
 import { getStarknetWalletBalances } from "./starknet";
 import { getTokenPrices, getEthPrice } from "./prices";
 import { analyzePortfolio, generateAdvice, type PortfolioAnalysis } from "./advisor";
@@ -26,7 +26,7 @@ const { app, addEntrypoint } = await createAgentApp(agent);
 // Input schema for wallet analysis
 const analyzeWalletInput = z.object({
   address: z.string().min(1, "Wallet address is required"),
-  chain: z.enum(["ethereum", "base", "arbitrum", "starknet"]).default("ethereum"),
+  chain: z.enum(["ethereum", "base", "arbitrum", "hyperliquid", "starknet", "all"]).default("all"),
 });
 
 // Output schema
@@ -50,11 +50,59 @@ const analyzeWalletOutput = z.object({
   advice: z.string(),
 });
 
+// Helper to process EVM chain balances
+async function processEVMBalances(
+  balances: Awaited<ReturnType<typeof getEVMWalletBalances>>,
+  ethPrice: number,
+  chainLabel: string
+): Promise<Array<{ symbol: string; balance: string; valueUsd: number; chain: string }>> {
+  const holdings: Array<{ symbol: string; balance: string; valueUsd: number; chain: string }> = [];
+
+  // Add native balance (ETH)
+  const nativeValueUsd = parseFloat(balances.nativeBalance.formattedBalance) * ethPrice;
+  if (nativeValueUsd > 0.01) {
+    holdings.push({
+      symbol: "ETH",
+      balance: balances.nativeBalance.formattedBalance,
+      valueUsd: nativeValueUsd,
+      chain: chainLabel,
+    });
+  }
+
+  // Add token balances
+  for (const token of balances.tokenBalances) {
+    let price = 0;
+    if (["USDC", "USDT", "DAI", "USDbC"].includes(token.symbol)) {
+      price = 1;
+    } else if (token.symbol === "WETH") {
+      price = ethPrice;
+    } else if (token.symbol === "ARB") {
+      price = 0.35; // Approximate ARB price
+    } else if (token.symbol === "HYPE") {
+      price = 20; // Approximate HYPE price
+    } else {
+      price = 0;
+    }
+
+    const valueUsd = parseFloat(token.formattedBalance) * price;
+    if (valueUsd > 0.01) {
+      holdings.push({
+        symbol: token.symbol,
+        balance: token.formattedBalance,
+        valueUsd,
+        chain: chainLabel,
+      });
+    }
+  }
+
+  return holdings;
+}
+
 // Main endpoint: Analyze wallet exposure
 addEntrypoint({
   key: "analyze-wallet",
   description:
-    "Analyze a wallet's token exposure and get AI-powered rebalancing advice. Supports Ethereum, Base, Arbitrum, and Starknet.",
+    "Analyze a wallet's token exposure and get AI-powered rebalancing advice. Supports Ethereum, Base, Arbitrum, Hyperliquid, Starknet, or 'all' for multi-chain.",
   input: analyzeWalletInput,
   output: analyzeWalletOutput,
   // Price: $0.10 per analysis (configured via DEFAULT_PRICE env)
@@ -65,12 +113,61 @@ addEntrypoint({
 
     try {
       // Fetch balances based on chain
-      let holdings: Array<{ symbol: string; balance: string; valueUsd: number }> = [];
+      let holdings: Array<{ symbol: string; balance: string; valueUsd: number; chain?: string }> = [];
+      const ethPrice = await getEthPrice();
 
-      if (chain === "starknet") {
+      if (chain === "all") {
+        // Query ALL chains (EVM + Starknet)
+        console.log("[analyze-wallet] Fetching from all chains...");
+
+        // Get all EVM balances in parallel
+        const evmBalances = await getAllEVMWalletBalances(address);
+        for (const balances of evmBalances) {
+          const chainHoldings = await processEVMBalances(balances, ethPrice, balances.chain);
+          holdings.push(...chainHoldings);
+        }
+
+        // Get Starknet balances (only if address looks like Starknet format)
+        if (address.startsWith("0x") && address.length > 42) {
+          try {
+            const starknetBalances = await getStarknetWalletBalances(address);
+            const tokenPrices = await getTokenPrices(
+              starknetBalances.tokenBalances.map((t) => ({
+                chain: "starknet",
+                address: t.address,
+                symbol: t.symbol,
+              }))
+            );
+
+            for (const token of starknetBalances.tokenBalances) {
+              let price = 0;
+              if (token.symbol === "ETH") {
+                price = ethPrice;
+              } else if (["USDC", "USDT", "DAI"].includes(token.symbol)) {
+                price = 1;
+              } else {
+                const priceData = tokenPrices.get(token.address.toLowerCase());
+                price = priceData?.price || 0;
+              }
+
+              const valueUsd = parseFloat(token.formattedBalance) * price;
+              if (valueUsd > 0.01) {
+                holdings.push({
+                  symbol: token.symbol,
+                  balance: token.formattedBalance,
+                  valueUsd,
+                  chain: "starknet",
+                });
+              }
+            }
+          } catch (e) {
+            console.log("[analyze-wallet] Skipping Starknet (EVM address format)");
+          }
+        }
+
+      } else if (chain === "starknet") {
         // Starknet wallet
         const balances = await getStarknetWalletBalances(address);
-        const ethPrice = await getEthPrice();
         
         // Get STRK and stablecoin prices
         const tokenPrices = await getTokenPrices(
@@ -100,63 +197,45 @@ addEntrypoint({
           };
         });
       } else {
-        // EVM wallet
-        const balances = await getEVMWalletBalances(
-          address,
-          chain as "ethereum" | "base" | "arbitrum"
-        );
-        const ethPrice = await getEthPrice();
+        // Single EVM chain
+        const balances = await getEVMWalletBalances(address, chain as EVMChain);
+        const chainHoldings = await processEVMBalances(balances, ethPrice, chain);
+        holdings.push(...chainHoldings);
+      }
 
-        // Get token prices
-        const allTokens = [
-          { chain, address: balances.nativeBalance.address, symbol: "ETH" },
-          ...balances.tokenBalances.map((t) => ({
-            chain,
-            address: t.address,
-            symbol: t.symbol,
-          })),
-        ];
-        const tokenPrices = await getTokenPrices(allTokens);
-
-        // Add native balance (ETH)
-        const nativeValueUsd =
-          parseFloat(balances.nativeBalance.formattedBalance) * ethPrice;
-        if (nativeValueUsd > 0.01) {
-          holdings.push({
-            symbol: "ETH",
-            balance: balances.nativeBalance.formattedBalance,
-            valueUsd: nativeValueUsd,
+      // Aggregate holdings by symbol (combine across chains)
+      const aggregatedHoldings = new Map<string, { symbol: string; balance: number; valueUsd: number; chains: string[] }>();
+      for (const holding of holdings) {
+        const existing = aggregatedHoldings.get(holding.symbol);
+        if (existing) {
+          existing.balance += parseFloat(holding.balance);
+          existing.valueUsd += holding.valueUsd;
+          if (holding.chain && !existing.chains.includes(holding.chain)) {
+            existing.chains.push(holding.chain);
+          }
+        } else {
+          aggregatedHoldings.set(holding.symbol, {
+            symbol: holding.symbol,
+            balance: parseFloat(holding.balance),
+            valueUsd: holding.valueUsd,
+            chains: holding.chain ? [holding.chain] : [],
           });
-        }
-
-        // Add token balances
-        for (const token of balances.tokenBalances) {
-          let price = 0;
-          if (["USDC", "USDT", "DAI", "USDbC"].includes(token.symbol)) {
-            price = 1;
-          } else if (token.symbol === "WETH") {
-            price = ethPrice;
-          } else {
-            const priceData = tokenPrices.get(token.address.toLowerCase());
-            price = priceData?.price || 0;
-          }
-
-          const valueUsd = parseFloat(token.formattedBalance) * price;
-          if (valueUsd > 0.01) {
-            holdings.push({
-              symbol: token.symbol,
-              balance: token.formattedBalance,
-              valueUsd,
-            });
-          }
         }
       }
 
+      // Convert back to array format
+      const finalHoldings = Array.from(aggregatedHoldings.values()).map((h) => ({
+        symbol: h.chains.length > 1 ? `${h.symbol} (${h.chains.join("+")})` : h.symbol,
+        balance: h.balance.toString(),
+        valueUsd: h.valueUsd,
+      }));
+
       // Analyze portfolio
-      const analysis = analyzePortfolio(holdings);
+      const analysis = analyzePortfolio(finalHoldings);
 
       // Generate AI advice
-      const advice = await generateAdvice(analysis, chain);
+      const chainLabel = chain === "all" ? "multi-chain (Ethereum, Base, Arbitrum, Hyperliquid)" : chain;
+      const advice = await generateAdvice(analysis, chainLabel);
 
       const result: PortfolioAnalysis = {
         ...analysis,
@@ -168,7 +247,7 @@ addEntrypoint({
       return {
         output: {
           address,
-          chain,
+          chain: chain === "all" ? "all (ethereum+base+arbitrum+hyperliquid)" : chain,
           ...result,
         },
       };
