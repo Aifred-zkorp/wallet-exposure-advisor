@@ -1,0 +1,23 @@
+services:
+  - type: web
+    name: wallet-exposure-advisor
+    env: node
+    buildCommand: bun install && bun run build
+    startCommand: bun run start
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 3000
+      - key: AGENT_NAME
+        value: wallet-exposure-advisor
+      - key: AGENT_VERSION
+        value: 1.0.0
+      - key: AGENT_DESCRIPTION
+        value: AI-powered wallet exposure analyzer for EVM and Starknet
+      - key: NETWORK
+        value: base
+      - key: FACILITATOR_URL
+        value: https://facilitator.daydreams.systems
+      - key: DEFAULT_PRICE
+        value: 1000
