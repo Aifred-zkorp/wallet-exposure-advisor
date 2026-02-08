@@ -98,14 +98,14 @@ async function processEVMBalances(
   return holdings;
 }
 
-// Main endpoint: Analyze wallet exposure
+// Main endpoint: Analyze wallet exposure (PAID)
 addEntrypoint({
   key: "analyze-wallet",
   description:
     "Analyze a wallet's token exposure and get AI-powered rebalancing advice. Supports Ethereum, Base, Arbitrum, Hyperliquid, Starknet, or 'all' for multi-chain.",
   input: analyzeWalletInput,
   output: analyzeWalletOutput,
-  // Price: $0.10 per analysis (configured via DEFAULT_PRICE env)
+  price: 10000, // 0.01 USDC (price in micro-units: 10000 = 0.01 USDC)
   handler: async (ctx) => {
     const { address, chain } = ctx.input;
 
@@ -255,6 +255,168 @@ addEntrypoint({
       console.error("[analyze-wallet] Error:", error);
       throw new Error(
         `Failed to analyze wallet: ${error instanceof Error ? error.message : "Unknown error"}`
+      );
+    }
+  },
+});
+
+// Free endpoint: Get holdings without AI advice
+addEntrypoint({
+  key: "get-holdings",
+  description:
+    "Get a wallet's token holdings and portfolio breakdown (free tier). For AI-powered advice, use analyze-wallet.",
+  input: analyzeWalletInput,
+  output: z.object({
+    address: z.string(),
+    chain: z.string(),
+    totalValueUsd: z.number(),
+    holdings: z.array(
+      z.object({
+        symbol: z.string(),
+        balance: z.string(),
+        valueUsd: z.number(),
+        percentage: z.number(),
+        category: z.string(),
+      })
+    ),
+    riskLevel: z.string(),
+    stablecoinPercentage: z.number(),
+    volatilePercentage: z.number(),
+    concentrationRisk: z.boolean(),
+  }),
+  handler: async (ctx) => {
+    const { address, chain } = ctx.input;
+
+    console.log(`[get-holdings] Fetching holdings for ${address} on ${chain}...`);
+
+    try {
+      // Fetch balances (same logic as analyze-wallet, but without AI advice)
+      let holdings: Array<{ symbol: string; balance: string; valueUsd: number; chain?: string }> = [];
+      const ethPrice = await getEthPrice();
+
+      if (chain === "all") {
+        console.log("[get-holdings] Fetching from all chains...");
+
+        const evmBalances = await getAllEVMWalletBalances(address);
+        for (const balances of evmBalances) {
+          const chainHoldings = await processEVMBalances(balances, ethPrice, balances.chain);
+          holdings.push(...chainHoldings);
+        }
+
+        if (address.startsWith("0x") && address.length > 42) {
+          try {
+            const starknetBalances = await getStarknetWalletBalances(address);
+            const tokenPrices = await getTokenPrices(
+              starknetBalances.tokenBalances.map((t) => ({
+                chain: "starknet",
+                address: t.address,
+                symbol: t.symbol,
+              }))
+            );
+
+            for (const token of starknetBalances.tokenBalances) {
+              let price = 0;
+              if (token.symbol === "ETH") {
+                price = ethPrice;
+              } else if (["USDC", "USDT", "DAI"].includes(token.symbol)) {
+                price = 1;
+              } else {
+                const priceData = tokenPrices.get(token.address.toLowerCase());
+                price = priceData?.price || 0;
+              }
+
+              const valueUsd = parseFloat(token.formattedBalance) * price;
+              if (valueUsd > 0.01) {
+                holdings.push({
+                  symbol: token.symbol,
+                  balance: token.formattedBalance,
+                  valueUsd,
+                  chain: "starknet",
+                });
+              }
+            }
+          } catch (e) {
+            console.log("[get-holdings] Skipping Starknet (EVM address format)");
+          }
+        }
+
+      } else if (chain === "starknet") {
+        const balances = await getStarknetWalletBalances(address);
+        
+        const tokenPrices = await getTokenPrices(
+          balances.tokenBalances.map((t) => ({
+            chain: "starknet",
+            address: t.address,
+            symbol: t.symbol,
+          }))
+        );
+
+        holdings = balances.tokenBalances.map((token) => {
+          let price = 0;
+          if (token.symbol === "ETH") {
+            price = ethPrice;
+          } else if (["USDC", "USDT", "DAI"].includes(token.symbol)) {
+            price = 1;
+          } else {
+            const priceData = tokenPrices.get(token.address.toLowerCase());
+            price = priceData?.price || 0;
+          }
+
+          const valueUsd = parseFloat(token.formattedBalance) * price;
+          return {
+            symbol: token.symbol,
+            balance: token.formattedBalance,
+            valueUsd,
+          };
+        });
+      } else {
+        const balances = await getEVMWalletBalances(address, chain as EVMChain);
+        const chainHoldings = await processEVMBalances(balances, ethPrice, chain);
+        holdings.push(...chainHoldings);
+      }
+
+      // Aggregate holdings
+      const aggregatedHoldings = new Map<string, { symbol: string; balance: number; valueUsd: number; chains: string[] }>();
+      for (const holding of holdings) {
+        const existing = aggregatedHoldings.get(holding.symbol);
+        if (existing) {
+          existing.balance += parseFloat(holding.balance);
+          existing.valueUsd += holding.valueUsd;
+          if (holding.chain && !existing.chains.includes(holding.chain)) {
+            existing.chains.push(holding.chain);
+          }
+        } else {
+          aggregatedHoldings.set(holding.symbol, {
+            symbol: holding.symbol,
+            balance: parseFloat(holding.balance),
+            valueUsd: holding.valueUsd,
+            chains: holding.chain ? [holding.chain] : [],
+          });
+        }
+      }
+
+      const finalHoldings = Array.from(aggregatedHoldings.values()).map((h) => ({
+        symbol: h.chains.length > 1 ? `${h.symbol} (${h.chains.join("+")})` : h.symbol,
+        balance: h.balance.toString(),
+        valueUsd: h.valueUsd,
+      }));
+
+      // Analyze portfolio (without generating AI advice)
+      const analysis = analyzePortfolio(finalHoldings);
+
+      console.log(`[get-holdings] Holdings fetched. Total: $${analysis.totalValueUsd.toFixed(2)}`);
+
+      return {
+        output: {
+          address,
+          chain: chain === "all" ? "all (ethereum+base+arbitrum+hyperliquid)" : chain,
+          ...analysis,
+        },
+      };
+    } catch (error) {
+      console.error("[get-holdings] Error:", error);
+      throw new Error(
+        `Failed to fetch holdings: ${error instanceof Error ? error.message : "Unknown error"}`
       );
     }
   },
