@@ -105,7 +105,7 @@ addEntrypoint({
     "Analyze a wallet's token exposure and get AI-powered rebalancing advice. Supports Ethereum, Base, Arbitrum, Hyperliquid, Starknet, or 'all' for multi-chain.",
   input: analyzeWalletInput,
   output: analyzeWalletOutput,
-  price: 10000, // 0.01 USDC (price in micro-units: 10000 = 0.01 USDC)
+  price: "0.01", // 0.01 USDC (Lucid Agents converts string to micro-units automatically)
   handler: async (ctx) => {
     const { address, chain } = ctx.input;
 
